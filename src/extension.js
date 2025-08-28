@@ -126,6 +126,10 @@ class Manager {
             clearTimeout(this._actionWidgets.tilerHider);
             this._actionWidgets.tilerHider = null;
         }
+        if (this._actionWidgets.resetApplist) {
+            clearTimeout(this._actionWidgets.resetApplist);
+            this._actionWidgets.resetApplist = null;
+        }
     }
 
     // Cleanup Extension
@@ -598,6 +602,53 @@ class Manager {
         return windows.map(w => {
             return w.is_attached_dialog() ? w.get_transient_for() : w;
         }).filter((w, i, a) => !w.skip_taskbar && a.indexOf(w) === i);
+    }
+
+    // Get Application List
+    _getApplicationList() {
+        let wm = global.workspace_manager;
+        let workspace = wm.get_active_workspace();
+        let windows = global.display.get_tab_list(
+            Meta.TabList.NORMAL_ALL, workspace
+        );
+
+        // Group windows by application
+        let appMap = new Map();
+        windows.forEach(w => {
+            let window = w.is_attached_dialog() ? w.get_transient_for() : w;
+            if (!window || window.skip_taskbar) return;
+
+            let app = this._winmanWinApp(window);
+            if (!app) return;
+
+            if (!appMap.has(app)) {
+                appMap.set(app, []);
+            }
+            appMap.get(app).push(window);
+        });
+
+        // Convert to array of applications with their windows
+        // Sort by most recently used (active window first)
+        let activeWindow = global.display.get_focus_window();
+        let apps = Array.from(appMap.entries()).map(([app, windows]) => ({
+            app: app,
+            windows: windows,
+            activeWindow: windows[0] // First window as representative
+        }));
+
+        // Put active application first
+        if (activeWindow) {
+            let activeApp = this._winmanWinApp(activeWindow);
+            if (activeApp) {
+                let activeIndex = apps.findIndex(a => a.app === activeApp);
+                if (activeIndex > 0) {
+                    let activeAppData = apps.splice(activeIndex, 1)[0];
+                    apps.unshift(activeAppData);
+                }
+            }
+        }
+
+        return apps;
     }
 
     // Hide Preview
@@ -1635,6 +1686,8 @@ class Manager {
             case 9: cfg_name = "pinch3-out"; break;
             case 10: cfg_name = "pinch4-in"; break;
             case 11: cfg_name = "pinch4-out"; break;
+            case 24: return 24; // Next application - direct return
+            case 25: return 25; // Previous application - direct return
             default:
                 if (type >= 50 && type <= 53) {
                     // Max & Snap
@@ -1889,17 +1942,20 @@ class Manager {
             }
 
         }
-        else if ((id == 4) || (id == 5)) {
+        else if ((id == 4) || (id == 5) || (id == 24) || (id == 25)) {
             //
-            // NEXT & PREVIOUS WINDOW SWITCHING
+            // NEXT & PREVIOUS WINDOW/APPLICATION SWITCHING
             //
             if (this._isOnOverview()) {
                 return; // Ignore on overview
             }
 
-            let prv = (id == 5);
+            let prv = (id == 5 || id == 25);
             let wid = prv ? "switchwin_prev" : "switchwin_next";
             let ui = this._actionWidgets[wid];
+
+            // Check if this should be application switching
+            let isAppSwitching = (id == 24 || id == 25);
 
             // Init indicator
             if (!ui) {
@@ -1912,14 +1968,25 @@ class Manager {
                     clearTimeout(this._actionWidgets.resetWinlist);
                     this._actionWidgets.resetWinlist = 0;
                 }
-                // Get cached window list
-                if (this._actionWidgets.cacheWinTabList) {
-                    wins = this._actionWidgets.cacheWinTabList?.wins;
-                    listActor = this._actionWidgets.cacheWinTabList?.actor;
+                // Get cached window/app list
+                if (isAppSwitching) {
+                    if (this._actionWidgets.cacheAppTabList) {
+                        wins = this._actionWidgets.cacheAppTabList?.apps;
+                        listActor = this._actionWidgets.cacheAppTabList?.actor;
+                    }
+                } else {
+                    if (this._actionWidgets.cacheWinTabList) {
+                        wins = this._actionWidgets.cacheWinTabList?.wins;
+                        listActor = this._actionWidgets.cacheWinTabList?.actor;
+                    }
                 }
                 if (!wins) {
                     // No last cached
-                    wins = this._getWindowTabList();
+                    if (isAppSwitching) {
+                        wins = this._getApplicationList();
+                    } else {
+                        wins = this._getWindowTabList();
+                    }
                     if (wins.length > 1) {
                         // Create UI
                         let gsize = Main.layoutManager.uiGroup.get_size();
@@ -1943,7 +2010,7 @@ class Manager {
                             pivY = 1;
                         }
                         listActor = this._createUi(
-                            "wgs-winswitch", lX, lY, lW, lH
+                            isAppSwitching ? "wgs-appswitch" : "wgs-winswitch", lX, lY, lW, lH
                         );
                         listActor.set_pivot_point(0.5, pivY);
                         listActor.opacity = 0;
@@ -1951,22 +2018,42 @@ class Manager {
                         listActor.scale_y = 0.5;
                         listActor._data = [];
                         for (var i = 0; i < wins.length; i++) {
-                            let win = wins[i];
-                            let app = this._winmanWinApp(win);
-                            let ico = app.create_icon_texture(32);
-                            ico.add_style_class_name("wgs-winswitch-ico");
-                            // remove_style_class_name
+                            let item = wins[i];
+                            let ico, app, win;
+
+                            if (isAppSwitching) {
+                                // Application switching
+                                app = item.app;
+                                win = item.activeWindow;
+                                ico = app.create_icon_texture(32);
+                                ico.add_style_class_name("wgs-appswitch-ico");
+                            } else {
+                                // Window switching
+                                win = item;
+                                app = this._winmanWinApp(win);
+                                ico = app.create_icon_texture(32);
+                                ico.add_style_class_name("wgs-winswitch-ico");
+                            }
+
                             listActor.add_child(ico);
                             ico.set_size(32, 32);
                             ico.set_position((pad * 2) + (48 * i), pad);
                             ico.set_pivot_point(0.5, 0.5);
-                            listActor._data.push(
-                                {
+
+                            if (isAppSwitching) {
+                                listActor._data.push({
+                                    app: app,
+                                    windows: item.windows,
+                                    activeWindow: win,
+                                    ico: ico
+                                });
+                            } else {
+                                listActor._data.push({
                                     app: app,
                                     win: win,
                                     ico: ico
-                                }
-                            )
+                                });
+                            }
                         }
                         listActor.viewShow({
                             opacity: 255,
@@ -1975,15 +2062,28 @@ class Manager {
                         }, 200);
 
                         // Reorder for next (below 1s) calls
-                        this._actionWidgets.cacheWinTabList = {
-                            sel: 0,
-                            first: wins[0],
-                            wins: wins,
-                            actor: listActor
-                        };
+                        if (isAppSwitching) {
+                            this._actionWidgets.cacheAppTabList = {
+                                sel: 0,
+                                first: wins[0],
+                                apps: wins,
+                                actor: listActor
+                            };
+                        } else {
+                            this._actionWidgets.cacheWinTabList = {
+                                sel: 0,
+                                first: wins[0],
+                                wins: wins,
+                                actor: listActor
+                            };
+                        }
                     }
                     else {
-                        this._actionWidgets.cacheWinTabList = null;
+                        if (isAppSwitching) {
+                            this._actionWidgets.cacheAppTabList = null;
+                        } else {
+                            this._actionWidgets.cacheWinTabList = null;
+                        }
                     }
                 }
                 if (wins.length > 1) {
@@ -1997,19 +2097,35 @@ class Manager {
                         ui.nsel = 1;
                     }
                     ui.lstate = 0;
-                    ui.from_actor = ui.from.get_compositor_private();
-                    ui.into_actor = ui.into.get_compositor_private();
+
+                    if (isAppSwitching) {
+                        ui.from_actor = ui.from.activeWindow.get_compositor_private();
+                        ui.into_actor = ui.into.activeWindow.get_compositor_private();
+                    } else {
+                        ui.from_actor = ui.from.get_compositor_private();
+                        ui.into_actor = ui.into.get_compositor_private();
+                    }
                     ui.from_actor.set_pivot_point(0.5, 1);
                     ui.into_actor.set_pivot_point(0.5, 1);
 
                     // Set selected target
                     for (var i = 0; i < listActor._data.length; i++) {
                         let d = listActor._data[i];
-                        if (d.win == ui.from) {
+                        let fromMatch, intoMatch;
+
+                        if (isAppSwitching) {
+                            fromMatch = (d.app == ui.from.app);
+                            intoMatch = (d.app == ui.into.app);
+                        } else {
+                            fromMatch = (d.win == ui.from);
+                            intoMatch = (d.win == ui.into);
+                        }
+
+                        if (fromMatch) {
                             d.ico.add_style_class_name("selected");
                             ui.from_ico = d.ico;
                         }
-                        else if (d.win == ui.into) {
+                        else if (intoMatch) {
                             d.ico.remove_style_class_name("selected");
                             ui.into_ico = d.ico;
                         }
@@ -2032,7 +2148,11 @@ class Manager {
                     if (progress > 0.8) {
                         if (!ui.lstate) {
                             try {
-                                ui.into.raise();
+                                if (isAppSwitching) {
+                                    ui.into.activeWindow.raise();
+                                } else {
+                                    ui.into.raise();
+                                }
                             } catch (e) { }
                             ui.lstate = 1;
                             ui.from_ico?.remove_style_class_name("selected");
@@ -2041,7 +2161,11 @@ class Manager {
                     }
                     else if (ui.lstate) {
                         try {
-                            ui.from.raise();
+                            if (isAppSwitching) {
+                                ui.from.activeWindow.raise();
+                            } else {
+                                ui.from.raise();
+                            }
                         } catch (e) { }
                         ui.lstate = 0;
                         ui.from_ico?.add_style_class_name("selected");
@@ -2052,27 +2176,56 @@ class Manager {
                     if ((progress > 0.8) || ui.lstate) {
                         try {
                             try {
-                                this._actionWidgets
-                                    .cacheWinTabList.first.activate(
-                                        Meta.CURRENT_TIME
-                                    );
+                                if (isAppSwitching) {
+                                    this._actionWidgets
+                                        .cacheAppTabList.first.activeWindow.activate(
+                                            Meta.CURRENT_TIME
+                                        );
+                                } else {
+                                    this._actionWidgets
+                                        .cacheWinTabList.first.activate(
+                                            Meta.CURRENT_TIME
+                                        );
+                                }
                             } catch (e) { }
                             try {
-                                ui.from.raise();
+                                if (isAppSwitching) {
+                                    ui.from.activeWindow.raise();
+                                } else {
+                                    ui.from.raise();
+                                }
                             } catch (e) { }
-                            ui.into.activate(
-                                Meta.CURRENT_TIME
-                            );
+                            if (isAppSwitching) {
+                                ui.into.activeWindow.activate(
+                                    Meta.CURRENT_TIME
+                                );
+                            } else {
+                                ui.into.activate(
+                                    Meta.CURRENT_TIME
+                                );
+                            }
                         } catch (e) { }
                         if (prv) {
-                            this._actionWidgets.cacheWinTabList.wins.unshift(
-                                this._actionWidgets.cacheWinTabList.wins.pop()
-                            );
+                            if (isAppSwitching) {
+                                this._actionWidgets.cacheAppTabList.apps.unshift(
+                                    this._actionWidgets.cacheAppTabList.apps.pop()
+                                );
+                            } else {
+                                this._actionWidgets.cacheWinTabList.wins.unshift(
+                                    this._actionWidgets.cacheWinTabList.wins.pop()
+                                );
+                            }
                         }
                         else {
-                            this._actionWidgets.cacheWinTabList.wins.push(
-                                this._actionWidgets.cacheWinTabList.wins.shift()
-                            );
+                            if (isAppSwitching) {
+                                this._actionWidgets.cacheAppTabList.apps.push(
+                                    this._actionWidgets.cacheAppTabList.apps.shift()
+                                );
+                            } else {
+                                this._actionWidgets.cacheWinTabList.wins.push(
+                                    this._actionWidgets.cacheWinTabList.wins.shift()
+                                );
+                            }
                         }
                         ui.from_ico?.remove_style_class_name("selected");
                         ui.into_ico?.add_style_class_name("selected");
@@ -2121,15 +2274,27 @@ class Manager {
 
                     // Clear cache after timeout
                     let me = this;
-                    this._actionWidgets.resetWinlist = setTimeout(
-                        function () {
-                            me._actionWidgets
-                                .cacheWinTabList.actor.aniRelease();
-                            me._actionWidgets.cacheWinTabList = null;
-                            clearTimeout(me._actionWidgets.resetWinlist);
-                            me._actionWidgets.resetWinlist = 0;
-                        }, 500
-                    );
+                    if (isAppSwitching) {
+                        this._actionWidgets.resetApplist = setTimeout(
+                            function () {
+                                me._actionWidgets
+                                    .cacheAppTabList.actor.aniRelease();
+                                me._actionWidgets.cacheAppTabList = null;
+                                clearTimeout(me._actionWidgets.resetApplist);
+                                me._actionWidgets.resetApplist = 0;
+                            }, 500
+                        );
+                    } else {
+                        this._actionWidgets.resetWinlist = setTimeout(
+                            function () {
+                                me._actionWidgets
+                                    .cacheWinTabList.actor.aniRelease();
+                                me._actionWidgets.cacheWinTabList = null;
+                                clearTimeout(me._actionWidgets.resetWinlist);
+                                me._actionWidgets.resetWinlist = 0;
+                            }, 500
+                        );
+                    }
                 }
             } else if (state) {
                 this._actionWidgets[wid] = ui = null;
