@@ -90,6 +90,11 @@ export default class extends ExtensionPreferences {
             "Enable move window snap",
             ""
         );
+        this._createSwitch(
+            fn, "fixed-window-order",
+            "Use fixed window order for switching",
+            "When enabled, window switching will follow a fixed order based on window creation time instead of cycling between two windows"
+        );
 
         // Actions
         const action_list = [

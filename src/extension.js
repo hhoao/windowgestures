@@ -604,6 +604,29 @@ class Manager {
         }).filter((w, i, a) => !w.skip_taskbar && a.indexOf(w) === i);
     }
 
+    // Get Window Tab List with Fixed Order
+    _getWindowTabListFixed() {
+        let wm = global.workspace_manager;
+        let workspace = wm.get_active_workspace();
+        let windows = global.display.get_tab_list(
+            Meta.TabList.NORMAL_ALL, workspace
+        );
+
+        // Filter and map windows
+        let filteredWindows = windows.map(w => {
+            return w.is_attached_dialog() ? w.get_transient_for() : w;
+        }).filter((w, i, a) => !w.skip_taskbar && a.indexOf(w) === i);
+
+        // Sort by process creation time (oldest first)
+        filteredWindows.sort((a, b) => {
+            let timeA = this._getProcessCreationTime(a.get_pid());
+            let timeB = this._getProcessCreationTime(b.get_pid());
+            return timeA - timeB;
+        });
+
+        return filteredWindows;
+    }
+
     // Get Application List
     _getApplicationList() {
         let wm = global.workspace_manager;
@@ -647,6 +670,43 @@ class Manager {
                 }
             }
         }
+
+        return apps;
+    }
+
+    // Get Application List with Fixed Order
+    _getApplicationListFixed() {
+        let wm = global.workspace_manager;
+        let workspace = wm.get_active_workspace();
+        let windows = global.display.get_tab_list(
+            Meta.TabList.NORMAL_ALL, workspace
+        );
+
+        // Group windows by application
+        let appMap = new Map();
+        windows.forEach(w => {
+            let window = w.is_attached_dialog() ? w.get_transient_for() : w;
+            if (!window || window.skip_taskbar) return;
+
+            let app = this._winmanWinApp(window);
+            if (!app) return;
+
+            if (!appMap.has(app)) {
+                appMap.set(app, []);
+            }
+            appMap.get(app).push(window);
+        });
+
+        // Convert to array of applications with their windows
+        let apps = Array.from(appMap.entries()).map(([app, windows]) => ({
+            app: app,
+            windows: windows,
+            activeWindow: windows[0], // First window as representative
+            processTime: this._getProcessCreationTime(windows[0].get_pid()) // Use process creation time for sorting
+        }));
+
+        // Sort by process creation time (oldest first)
+        apps.sort((a, b) => a.processTime - b.processTime);
 
         return apps;
     }
@@ -1982,10 +2042,11 @@ class Manager {
                 }
                 if (!wins) {
                     // No last cached
+                    let useFixedOrder = this._settings.get_boolean('fixed-window-order');
                     if (isAppSwitching) {
-                        wins = this._getApplicationList();
+                        wins = useFixedOrder ? this._getApplicationListFixed() : this._getApplicationList();
                     } else {
-                        wins = this._getWindowTabList();
+                        wins = useFixedOrder ? this._getWindowTabListFixed() : this._getWindowTabList();
                     }
                     if (wins.length > 1) {
                         // Create UI
@@ -2062,19 +2123,43 @@ class Manager {
                         }, 200);
 
                         // Reorder for next (below 1s) calls
+                        let useFixedOrder = this._settings.get_boolean('fixed-window-order');
+                        let currentIndex = 0;
+
+                        if (useFixedOrder) {
+                            // Find current active window/app in the sorted list
+                            let activeWindow = global.display.get_focus_window();
+                            if (activeWindow) {
+                                if (isAppSwitching) {
+                                    let activeApp = this._winmanWinApp(activeWindow);
+                                    currentIndex = wins.findIndex(item => item.app === activeApp);
+                                } else {
+                                    currentIndex = wins.findIndex(win => win === activeWindow);
+                                }
+                            }
+                            // If not found, use 0 as default
+                            if (currentIndex === -1) {
+                                currentIndex = 0;
+                            }
+                        }
+
                         if (isAppSwitching) {
                             this._actionWidgets.cacheAppTabList = {
                                 sel: 0,
                                 first: wins[0],
                                 apps: wins,
-                                actor: listActor
+                                actor: listActor,
+                                useFixedOrder: useFixedOrder,
+                                currentIndex: currentIndex
                             };
                         } else {
                             this._actionWidgets.cacheWinTabList = {
                                 sel: 0,
                                 first: wins[0],
                                 wins: wins,
-                                actor: listActor
+                                actor: listActor,
+                                useFixedOrder: useFixedOrder,
+                                currentIndex: currentIndex
                             };
                         }
                     }
@@ -2087,16 +2172,60 @@ class Manager {
                     }
                 }
                 if (wins.length > 1) {
-                    ui = { from: wins[0] };
-                    if (prv) {
-                        ui.into = wins[wins.length - 1];
-                        ui.nsel = -1;
+                    let useFixedOrder = this._settings.get_boolean('fixed-window-order');
+                    let cache = isAppSwitching ? this._actionWidgets.cacheAppTabList : this._actionWidgets.cacheWinTabList;
+
+                    if (useFixedOrder && cache && cache.useFixedOrder) {
+                        // Use fixed order with index
+                        let currentIndex = cache.currentIndex;
+                        let nextIndex;
+
+                        if (prv) {
+                            nextIndex = (currentIndex - 1 + wins.length) % wins.length;
+                        } else {
+                            nextIndex = (currentIndex + 1) % wins.length;
+                        }
+
+                        ui = {
+                            from: wins[currentIndex],
+                            into: wins[nextIndex],
+                            nsel: prv ? -1 : 1,
+                            lstate: 0,
+                            currentIndex: currentIndex,
+                            nextIndex: nextIndex
+                        };
+                    } else {
+                        // Use original logic - find current active window/app
+                        let activeWindow = global.display.get_focus_window();
+                        let fromIndex = 0;
+
+                        if (activeWindow) {
+                            if (isAppSwitching) {
+                                let activeApp = this._winmanWinApp(activeWindow);
+                                fromIndex = wins.findIndex(item => item.app === activeApp);
+                            } else {
+                                fromIndex = wins.findIndex(win => win === activeWindow);
+                            }
+                        }
+
+                        if (fromIndex === -1) {
+                            fromIndex = 0;
+                        }
+
+                        let toIndex;
+                        if (prv) {
+                            toIndex = (fromIndex - 1 + wins.length) % wins.length;
+                        } else {
+                            toIndex = (fromIndex + 1) % wins.length;
+                        }
+
+                        ui = {
+                            from: wins[fromIndex],
+                            into: wins[toIndex],
+                            nsel: prv ? -1 : 1,
+                            lstate: 0
+                        };
                     }
-                    else {
-                        ui.into = wins[1];
-                        ui.nsel = 1;
-                    }
-                    ui.lstate = 0;
 
                     if (isAppSwitching) {
                         ui.from_actor = ui.from.activeWindow.get_compositor_private();
@@ -2139,18 +2268,22 @@ class Manager {
             if (ui && ui != -1) {
                 if (!state) {
                     try {
-                        ui.from_actor.opacity = 255 - Math.round(80 * progress);
-                        ui.from_actor.scale_y =
-                            ui.from_actor.scale_x = 1.0 - (0.05 * progress);
-                        ui.into_actor.scale_y =
-                            ui.into_actor.scale_x = 1.0 + (0.05 * progress);
+                        if (ui.from_actor && !ui.from_actor.is_destroyed && ui.from_actor.is_destroyed !== undefined) {
+                            ui.from_actor.opacity = 255 - Math.round(80 * progress);
+                            ui.from_actor.scale_y =
+                                ui.from_actor.scale_x = 1.0 - (0.05 * progress);
+                        }
+                        if (ui.into_actor && !ui.into_actor.is_destroyed && ui.into_actor.is_destroyed !== undefined) {
+                            ui.into_actor.scale_y =
+                                ui.into_actor.scale_x = 1.0 + (0.05 * progress);
+                        }
                     } catch (e) { }
                     if (progress > 0.8) {
                         if (!ui.lstate) {
                             try {
-                                if (isAppSwitching) {
+                                if (isAppSwitching && ui.into && ui.into.activeWindow) {
                                     ui.into.activeWindow.raise();
-                                } else {
+                                } else if (ui.into) {
                                     ui.into.raise();
                                 }
                             } catch (e) { }
@@ -2161,9 +2294,9 @@ class Manager {
                     }
                     else if (ui.lstate) {
                         try {
-                            if (isAppSwitching) {
+                            if (isAppSwitching && ui.from && ui.from.activeWindow) {
                                 ui.from.activeWindow.raise();
-                            } else {
+                            } else if (ui.from) {
                                 ui.from.raise();
                             }
                         } catch (e) { }
@@ -2176,12 +2309,15 @@ class Manager {
                     if ((progress > 0.8) || ui.lstate) {
                         try {
                             try {
-                                if (isAppSwitching) {
+                                if (isAppSwitching && this._actionWidgets.cacheAppTabList &&
+                                    this._actionWidgets.cacheAppTabList.first &&
+                                    this._actionWidgets.cacheAppTabList.first.activeWindow) {
                                     this._actionWidgets
                                         .cacheAppTabList.first.activeWindow.activate(
                                             Meta.CURRENT_TIME
                                         );
-                                } else {
+                                } else if (this._actionWidgets.cacheWinTabList &&
+                                    this._actionWidgets.cacheWinTabList.first) {
                                     this._actionWidgets
                                         .cacheWinTabList.first.activate(
                                             Meta.CURRENT_TIME
@@ -2189,42 +2325,41 @@ class Manager {
                                 }
                             } catch (e) { }
                             try {
-                                if (isAppSwitching) {
+                                if (isAppSwitching && ui.from && ui.from.activeWindow) {
                                     ui.from.activeWindow.raise();
-                                } else {
+                                } else if (ui.from) {
                                     ui.from.raise();
                                 }
                             } catch (e) { }
-                            if (isAppSwitching) {
+                            if (isAppSwitching && ui.into && ui.into.activeWindow) {
                                 ui.into.activeWindow.activate(
                                     Meta.CURRENT_TIME
                                 );
-                            } else {
+                            } else if (ui.into) {
                                 ui.into.activate(
                                     Meta.CURRENT_TIME
                                 );
                             }
                         } catch (e) { }
-                        if (prv) {
-                            if (isAppSwitching) {
-                                this._actionWidgets.cacheAppTabList.apps.unshift(
-                                    this._actionWidgets.cacheAppTabList.apps.pop()
-                                );
-                            } else {
-                                this._actionWidgets.cacheWinTabList.wins.unshift(
-                                    this._actionWidgets.cacheWinTabList.wins.pop()
-                                );
+                        let cache = isAppSwitching ? this._actionWidgets.cacheAppTabList : this._actionWidgets.cacheWinTabList;
+                        if (cache && cache.useFixedOrder && ui.nextIndex !== undefined) {
+                            // Update index for fixed order mode
+                            cache.currentIndex = ui.nextIndex;
+                        } else if (cache) {
+                            // Use original reordering logic
+                            if (prv) {
+                                if (isAppSwitching && cache.apps && cache.apps.length > 0) {
+                                    cache.apps.unshift(cache.apps.pop());
+                                } else if (cache.wins && cache.wins.length > 0) {
+                                    cache.wins.unshift(cache.wins.pop());
+                                }
                             }
-                        }
-                        else {
-                            if (isAppSwitching) {
-                                this._actionWidgets.cacheAppTabList.apps.push(
-                                    this._actionWidgets.cacheAppTabList.apps.shift()
-                                );
-                            } else {
-                                this._actionWidgets.cacheWinTabList.wins.push(
-                                    this._actionWidgets.cacheWinTabList.wins.shift()
-                                );
+                            else {
+                                if (isAppSwitching && cache.apps && cache.apps.length > 0) {
+                                    cache.apps.push(cache.apps.shift());
+                                } else if (cache.wins && cache.wins.length > 0) {
+                                    cache.wins.push(cache.wins.shift());
+                                }
                             }
                         }
                         ui.from_ico?.remove_style_class_name("selected");
@@ -2237,38 +2372,58 @@ class Manager {
                     ui.nclose = 0;
                     // Ease Restore
                     try {
-                        ui.from_actor.ease({
-                            duration: Math.round(200 * progress),
-                            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                            opacity: 255,
-                            scale_x: 1,
-                            scale_y: 1,
-                            onStopped: () => {
-                                ui.from_actor.set_pivot_point(0, 0);
-                                ui.from_actor = null;
-                                ui.from = null;
-                                if (++ui.nclose == 2) {
-                                    ui = null;
+                        if (ui.from_actor && !ui.from_actor.is_destroyed && ui.from_actor.is_destroyed !== undefined) {
+                            ui.from_actor.ease({
+                                duration: Math.round(200 * progress),
+                                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                                opacity: 255,
+                                scale_x: 1,
+                                scale_y: 1,
+                                onStopped: () => {
+                                    if (ui.from_actor && !ui.from_actor.is_destroyed) {
+                                        ui.from_actor.set_pivot_point(0, 0);
+                                    }
+                                    ui.from_actor = null;
+                                    ui.from = null;
+                                    if (++ui.nclose == 2) {
+                                        ui = null;
+                                    }
                                 }
+                            });
+                        } else {
+                            ui.from_actor = null;
+                            ui.from = null;
+                            if (++ui.nclose == 2) {
+                                ui = null;
                             }
-                        });
+                        }
                     } catch (e) { }
                     try {
-                        ui.into_actor.ease({
-                            duration: Math.round(200 * progress),
-                            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                            opacity: 255,
-                            scale_x: 1,
-                            scale_y: 1,
-                            onStopped: () => {
-                                ui.into_actor.set_pivot_point(0, 0);
-                                ui.into_actor = null;
-                                ui.into = null;
-                                if (++ui.nclose == 2) {
-                                    ui = null;
+                        if (ui.into_actor && !ui.into_actor.is_destroyed && ui.into_actor.is_destroyed !== undefined) {
+                            ui.into_actor.ease({
+                                duration: Math.round(200 * progress),
+                                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                                opacity: 255,
+                                scale_x: 1,
+                                scale_y: 1,
+                                onStopped: () => {
+                                    if (ui.into_actor && !ui.into_actor.is_destroyed) {
+                                        ui.into_actor.set_pivot_point(0, 0);
+                                    }
+                                    ui.into_actor = null;
+                                    ui.into = null;
+                                    if (++ui.nclose == 2) {
+                                        ui = null;
+                                    }
                                 }
+                            });
+                        } else {
+                            ui.into_actor = null;
+                            ui.into = null;
+                            if (++ui.nclose == 2) {
+                                ui = null;
                             }
-                        });
+                        }
                     } catch (e) { }
                     this._actionWidgets[wid] = null;
 
@@ -2277,8 +2432,10 @@ class Manager {
                     if (isAppSwitching) {
                         this._actionWidgets.resetApplist = setTimeout(
                             function () {
-                                me._actionWidgets
-                                    .cacheAppTabList.actor.aniRelease();
+                                if (me._actionWidgets.cacheAppTabList &&
+                                    me._actionWidgets.cacheAppTabList.actor) {
+                                    me._actionWidgets.cacheAppTabList.actor.aniRelease();
+                                }
                                 me._actionWidgets.cacheAppTabList = null;
                                 clearTimeout(me._actionWidgets.resetApplist);
                                 me._actionWidgets.resetApplist = 0;
@@ -2287,8 +2444,10 @@ class Manager {
                     } else {
                         this._actionWidgets.resetWinlist = setTimeout(
                             function () {
-                                me._actionWidgets
-                                    .cacheWinTabList.actor.aniRelease();
+                                if (me._actionWidgets.cacheWinTabList &&
+                                    me._actionWidgets.cacheWinTabList.actor) {
+                                    me._actionWidgets.cacheWinTabList.actor.aniRelease();
+                                }
                                 me._actionWidgets.cacheWinTabList = null;
                                 clearTimeout(me._actionWidgets.resetWinlist);
                                 me._actionWidgets.resetWinlist = 0;
@@ -2829,6 +2988,56 @@ class Manager {
         //
         // End Of Actions
         //
+    }
+
+    // Update fixed order index when window list changes
+    _updateFixedOrderIndex(cache, currentWindow, isAppSwitching) {
+        if (!cache || !cache.useFixedOrder) return;
+
+        let wins = isAppSwitching ? cache.apps : cache.wins;
+        if (!wins || wins.length === 0) return;
+
+        // Find current window in the list
+        let newIndex = 0;
+        if (currentWindow) {
+            if (isAppSwitching) {
+                let currentApp = this._winmanWinApp(currentWindow);
+                newIndex = wins.findIndex(item => item.app === currentApp);
+            } else {
+                newIndex = wins.findIndex(win => win === currentWindow);
+            }
+        }
+
+        // If not found, use 0 as default
+        if (newIndex === -1) {
+            newIndex = 0;
+        }
+
+        cache.currentIndex = newIndex;
+    }
+
+    // Get process creation time by PID
+    _getProcessCreationTime(pid) {
+        try {
+            // Try to read from /proc/{pid}/stat
+            let statFile = Gio.File.new_for_path(`/proc/${pid}/stat`);
+            if (statFile.query_exists(null)) {
+                let [success, contents] = statFile.load_contents(null);
+                if (success) {
+                    let decoder = new TextDecoder();
+                    let statText = decoder.decode(contents);
+                    let statData = statText.split(' ');
+                    // The 22nd field (index 21) contains the start time in jiffies
+                    let startTime = parseInt(statData[21]);
+                    return startTime;
+                }
+            }
+        } catch (e) {
+            // If we can't read the stat file, fall back to window ID
+        }
+
+        // Fallback: return a large number to put unknown processes at the end
+        return Number.MAX_SAFE_INTEGER;
     }
 }
 
