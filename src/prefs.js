@@ -95,6 +95,11 @@ export default class extends ExtensionPreferences {
             "Use fixed window order for switching",
             "When enabled, window switching will follow a fixed order based on window creation time instead of cycling between two windows"
         );
+        this._createSwitch(
+            fn, "stable-window-switching",
+            "Use stable window switching",
+            "When enabled, window switching will be more stable and always switch exactly one window regardless of gesture distance"
+        );
 
         // Actions
         const action_list = [

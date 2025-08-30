@@ -2266,6 +2266,8 @@ class Manager {
                 this._actionWidgets[wid] = ui;
             }
             if (ui && ui != -1) {
+                let useStableSwitching = this._settings.get_boolean('stable-window-switching');
+
                 if (!state) {
                     try {
                         if (ui.from_actor && !ui.from_actor.is_destroyed && ui.from_actor.is_destroyed !== undefined) {
@@ -2278,7 +2280,11 @@ class Manager {
                                 ui.into_actor.scale_x = 1.0 + (0.05 * progress);
                         }
                     } catch (e) { }
-                    if (progress > 0.8) {
+
+                    // Determine when to switch based on stable mode
+                    let shouldSwitch = useStableSwitching ? (progress > 0.1) : (progress > 0.8);
+
+                    if (shouldSwitch) {
                         if (!ui.lstate) {
                             try {
                                 if (isAppSwitching && ui.into && ui.into.activeWindow) {
@@ -2306,7 +2312,10 @@ class Manager {
                     }
                 }
                 else {
-                    if ((progress > 0.8) || ui.lstate) {
+                    // In stable mode, always complete the switch when gesture ends
+                    let shouldComplete = useStableSwitching ? true : ((progress > 0.8) || ui.lstate);
+
+                    if (shouldComplete) {
                         try {
                             try {
                                 if (isAppSwitching && this._actionWidgets.cacheAppTabList &&
@@ -2366,6 +2375,36 @@ class Manager {
                         ui.into_ico?.add_style_class_name("selected");
                     }
                     else {
+                        // In stable mode, if we haven't switched yet, force a switch
+                        if (useStableSwitching && !ui.lstate) {
+                            try {
+                                if (isAppSwitching && ui.into && ui.into.activeWindow) {
+                                    ui.into.activeWindow.activate(Meta.CURRENT_TIME);
+                                } else if (ui.into) {
+                                    ui.into.activate(Meta.CURRENT_TIME);
+                                }
+                            } catch (e) { }
+
+                            // Update cache for next switch
+                            let cache = isAppSwitching ? this._actionWidgets.cacheAppTabList : this._actionWidgets.cacheWinTabList;
+                            if (cache && cache.useFixedOrder && ui.nextIndex !== undefined) {
+                                cache.currentIndex = ui.nextIndex;
+                            } else if (cache) {
+                                if (prv) {
+                                    if (isAppSwitching && cache.apps && cache.apps.length > 0) {
+                                        cache.apps.unshift(cache.apps.pop());
+                                    } else if (cache.wins && cache.wins.length > 0) {
+                                        cache.wins.unshift(cache.wins.pop());
+                                    }
+                                } else {
+                                    if (isAppSwitching && cache.apps && cache.apps.length > 0) {
+                                        cache.apps.push(cache.apps.shift());
+                                    } else if (cache.wins && cache.wins.length > 0) {
+                                        cache.wins.push(cache.wins.shift());
+                                    }
+                                }
+                            }
+                        }
                         ui.from_ico?.add_style_class_name("selected");
                         ui.into_ico?.remove_style_class_name("selected");
                     }
